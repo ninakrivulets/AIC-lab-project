@@ -14,122 +14,94 @@ import string
 import uuid
 import base64
 import pickle
-from utils import get_logger, code_backup
+import sys
+# from utils import get_logger, code_backup
 from torch.utils.tensorboard import SummaryWriter
 import shutil
 from model import Transformer
-
-
-def get_logger(exp_id, log_path):
-    #logger = logging.getLogger(f"Experiment_{exp_id}")
-    logger = logging.getLogger('main')
-    if not logger.handlers:
-        logger.setLevel(logging.INFO)
-        file_handler = logging.FileHandler(f"{log_path}/experiment_{exp_id}.log")
-        file_handler.setLevel(logging.INFO)
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s [%(filename)s:%(lineno)d %(funcName)s]'
-        )
-
-        #formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        file_handler.setFormatter(formatter)
-        console_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
-
-    return logger
-
-def generate_uuid():
-    """Generates a uuid 4 string, in this context for tracking each run of the experiment
-    Returns:
-        an ascii friendly uuid4 string.
-    """
-    return base64.urlsafe_b64encode(uuid.uuid4().bytes).rstrip(b"=").decode("ascii")
-
-def remove_brackets(input_string):
-    return re.sub(r'\[.*?\]', '', input_string)
-
-def add_random_letters(input_string):
-    amino_acids = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 
-                            'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
-    # Generate 100 random capital letters
-    random_letters_front = ''.join(random.choices(amino_acids, k=100))
-    random_letters_back = ''.join(random.choices(amino_acids, k=100))
-    # Add random letters before and after the input string
-    return random_letters_front + input_string + random_letters_back
+from model import generate_uuid
+from model import get_logger
+from model import remove_brackets
+from model import add_random_letters
 
 if  __name__ == "__main__":
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    transformer_model = Transformer(device=device).to(device)
-    optimizer = torch.optim.Adam(transformer_model.parameters(), lr=1e-3)
 
-    pickle_file_path = "/blob/dda/PXD028806/training_data/PXD028806_tailor_1.pkl"
-    # pickle_file_path = '/home/ninak/mz_val_10_full.pkl'
-    #plogger.info(f"Loading data from {pickle_file_path}")
-            
-            # Load data from the pickle file
-    with open(pickle_file_path, "rb") as f:
-                data = pickle.load(f)
-            
-            # Extract the DataFrame and m/z values from the loaded pickle data
-    #df = data["dataframe"] don't have this column
-    sequence_arr = data['sequence']
-    # sequence = sequence_arr[0]
-    mz_values = data["mz_values"]
-    # source_dir = '/home/ninak'
-    exp_dir = '/home/ninak/exps'
+    exp_id = generate_uuid()
+    exp_dir = '../checkpoints/'+exp_id
+
     if not os.path.exists(exp_dir):
         os.makedirs(exp_dir)
 
-    exp_id = generate_uuid()
     plogger = get_logger(exp_id=exp_id, log_path=exp_dir)
     plogger.info(f"Experiment ID: {exp_id}")
 
-    plogger.info(f"sequences shape: {sequence_arr.shape}")
-    plogger.info(f"mz_values shape: {mz_values.shape}")
     tensorboard_writer = SummaryWriter(log_dir=f"{exp_dir}")
     plogger.info("TensorBoard writer initialized.")
-    loss_values = []
 
-    for i in range(data.shape[0]):
-        plogger.info(f"Data ID: {i}")
-    
-        plogger.info(f"Extracted m/z values of shape {len(mz_values[i])}")  # and dtype {mz_values.dtype}")
-        
-        sequence_unfiltered = sequence_arr[i]
-        sequence = remove_brackets(sequence_unfiltered)
-        plogger.info(f"Peptide sequence: {sequence}")
-        mz_values_i = mz_values[i]
+
+    GPU_ID = 0
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = torch.device("cuda:"+str(GPU_ID) if torch.cuda.is_available() else "cpu")
+    plogger.info(f"Torch version: {torch.__version__}")
+    plogger.info(f"Torch device: {device}")
+
+    transformer_model = Transformer(device=device).to(device)
+    optimizer = torch.optim.Adam(transformer_model.parameters(), lr=1e-3)
+    loss_fn = nn.CrossEntropyLoss().to(device)
+
+
+    pickle_file_path = "/blob/dda/PXD028806/training_data/PXD028806_tailor_1.pkl"
+    plogger.info(f"reading data from:  {pickle_file_path}")
+            
+    # Load data from the pickle file
+    with open(pickle_file_path, "rb") as f:
+        data = pickle.load(f)
+
+    plogger.info(f"Data num read:  {len(data)}")
+
+    training_step = 0
+    for index, data_item in data.iterrows():
+
+        peaks_mz = data_item.mz_values
+        sequence = data_item.sequence
+        sequence_pain = remove_brackets(data_item.sequence)
+
+        plogger.info(f"Peptide seq: {sequence}")  
+        plogger.info(f"Peptide sequence: {sequence_pain}")
+
+        plogger.info(f"Speactrum peak num: {len(peaks_mz)}") 
         
         # Encoder input
-        encoder_input = torch.tensor(mz_values_i, device=device, dtype=torch.float32)
-        #print('enc shape', encoder_input.shape)
+        encoder_input = torch.tensor(peaks_mz, device=device, dtype=torch.float32)
         
         # Decoder input (sequence)
-        decoder_input = add_random_letters(sequence)
-        
+        decoder_input = add_random_letters(sequence_pain)        
         plogger.info(f"Decoder input sequence: {decoder_input}")
-        #print('input sequence', decoder_input)
 
-    # Forward pass
+        # Forward pass
         
         output_distribution = transformer_model(encoder_input, decoder_input)
         plogger.info(f"Model output distribution: {output_distribution}")
        
         # Loss function
-        loss_fn = nn.CrossEntropyLoss()
         
-        shape = output_distribution.shape[1]
-        target_position = shape // 2
+        target_position = len(decoder_input) // 2
         target = torch.tensor(target_position, device=device, dtype=torch.long).unsqueeze(dim=0)
-        optimizer.zero_grad()
         loss = loss_fn(output_distribution.view(-1, output_distribution.size(-1)), target)
-        loss_values.append(loss.item())
-        #print('Loss:', loss.item())
+
         plogger.info(f"Calculated loss: {loss.item()}")
-        tensorboard_writer = SummaryWriter(comment='Loss')
+        loss_to_report = loss.detach().data.cpu().numpy()
+        training_step += 1
+
+        if np.isnan(loss_to_report):
+            plogger.info(f"loss: {loss_to_report}")
+            sys.exit(f"Loss function is nan - {loss_to_report}!")
+
+        tensorboard_writer.add_scalar("Loss/train", loss_to_report, training_step)
+
+        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        plogger.info("Completed backpropagation and optimization step.")
+
+    plogger.info("Completed backpropagation and optimization step.")
+plogger.info("Done. Bye.")

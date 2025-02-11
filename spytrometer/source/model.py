@@ -12,9 +12,10 @@ import random
 import string
 import uuid
 import base64
-import pickle
-from utils import get_logger, code_backup
-from torch.utils.tensorboard import SummaryWriter
+import logging
+# import pickle
+# from utils import get_logger, code_backup
+# from torch.utils.tensorboard import SummaryWriter
 
 
 class PositionalEncoding(nn.Module):
@@ -171,3 +172,43 @@ class Transformer(nn.Module):
         distribution = F.softmax(final_output.squeeze(-1), dim=-1)
 
         return distribution
+    
+def get_logger(exp_id, log_path):
+    #logger = logging.getLogger(f"Experiment_{exp_id}")
+    logger = logging.getLogger('main')
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        file_handler = logging.FileHandler(f"{log_path}/experiment_{exp_id}.log")
+        file_handler.setLevel(logging.INFO)
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s [%(filename)s:%(lineno)d %(funcName)s]'
+        )
+
+        #formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
+
+    return logger
+
+def generate_uuid():
+    """Generates a uuid 4 string, in this context for tracking each run of the experiment
+    Returns:
+        an ascii friendly uuid4 string.
+    """
+    return base64.urlsafe_b64encode(uuid.uuid4().bytes).rstrip(b"=").decode("ascii")
+
+def remove_brackets(input_string):
+    return re.sub(r'\[.*?\]', '', input_string)
+
+def add_random_letters(input_string):
+    amino_acids = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 
+                            'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
+    # Generate 100 random capital letters
+    random_letters_front = ''.join(random.choices(amino_acids, k=100))
+    random_letters_back = ''.join(random.choices(amino_acids, k=100))
+    # Add random letters before and after the input string
+    return random_letters_front + input_string + random_letters_back
