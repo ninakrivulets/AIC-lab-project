@@ -19,17 +19,17 @@ import logging
 
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model=64, device='cuda'):
+    def __init__(self, device, d_model=64):
         super(PositionalEncoding, self).__init__()
         self.d_model = d_model
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device
 
         # Ensure that the d_model is even
         assert d_model % 2 == 0, "d_model should be an even number"
 
     def forward(self, mz_values):
         # Prepare a tensor for m/z values
-        mz_tensor = torch.tensor(mz_values, device=self.device).unsqueeze(1)  # shape: (n_peaks, 1)
+        mz_tensor = torch.tensor(mz_values, device=self.device, dtype=torch.float32).unsqueeze(1)  # shape: (n_peaks, 1)
         mz_tensor = mz_tensor.view(-1, 1) # reshaping 
         # Compute the positional encoding
         div_term = torch.exp(torch.arange(0, self.d_model, 2, device=self.device) * (-math.log(10000.0) / self.d_model))
@@ -44,17 +44,17 @@ class PositionalEncoding(nn.Module):
 
 
 class Embedding(nn.Module):
-    def __init__(self, embedding_dim=64, device='cuda'):
+    def __init__(self, device, embedding_dim=64):
         super(Embedding, self).__init__()
         self.embedding_dim = embedding_dim
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = device
         # creating a dictionary to map amino acids to indices
         self.amino_acids = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 
                             'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
         self.aa_to_idx = {aa: idx for idx, aa in enumerate(self.amino_acids)}
         
         # an embedding layer
-        self.embedding_layer = nn.Embedding(num_embeddings=len(self.amino_acids), embedding_dim=self.embedding_dim)
+        self.embedding_layer = nn.Embedding(num_embeddings=len(self.amino_acids), embedding_dim=self.embedding_dim).to(device)
 
     def forward(self, sequence):
         # Convert sequence to indices
@@ -112,7 +112,7 @@ class FeedForward(nn.Module):
 class DecoderLayer(nn.Module):
     def __init__(self, d_model, num_heads):
         super(DecoderLayer, self).__init__()
-        self.mha1 = MultiHeadAttention(d_model, num_heads)
+        # self.mha1 = MultiHeadAttention(d_model, num_heads)
         self.conv1d = nn.Conv1d(in_channels=d_model, out_channels=d_model, kernel_size=5, padding=2)
         self.mha2 = MultiHeadAttention(d_model, num_heads)
         self.ffn = FeedForward(d_model)
@@ -146,35 +146,36 @@ class Decoder(nn.Module):
         return x
 
 class Transformer(nn.Module):
-    def __init__(self, d_model=64, num_heads=8, num_layers=6, device='cuda'):
+    def __init__(self, device, d_model=64, num_heads=8, num_layers=6):
         super(Transformer, self).__init__()
-        self.encoder_positional_encoding = PositionalEncoding(d_model)
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads)
-        self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers)
+        self.encoder_positional_encoding = PositionalEncoding(device, d_model)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads).to(device)
+        self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers).to(device)
         
-        self.decoder_embedding = Embedding()  # embedding_dim is 64
-        self.decoder = Decoder(d_model, num_heads, num_layers)
+        self.decoder_embedding = Embedding(device, embedding_dim=d_model)  # embedding_dim is 64
+        self.decoder = Decoder(d_model, num_heads, num_layers).to(device)
         
-        self.final_layer = nn.Linear(d_model, 1)  # Output size is 1 for the center prediction
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.final_layer = nn.Linear(d_model, 1).to(device)  # Output size is 1 for the center prediction
+        self.device = device
+
     def forward(self, encoder_input, decoder_input):
         encoder_input = self.encoder_positional_encoding(encoder_input)
         enc_output = self.encoder(encoder_input)
 
         decoder_input_embedded = self.decoder_embedding(decoder_input)
-        print(f"decoder input (embedded) shape: {decoder_input_embedded.shape}")
-        print(f"encoder ouput shape: {enc_output.shape}")
+        # print(f"decoder input (embedded) shape: {decoder_input_embedded.shape}")
+        # print(f"encoder ouput shape: {enc_output.shape}")
         dec_output = self.decoder(decoder_input_embedded, enc_output)
+        # print(f"encoder ouput shape: {dec_output.shape}")
 
-        final_output = self.final_layer(dec_output)
+        final_output = self.final_layer(dec_output).squeeze(-1)
         
         # Applying softmax to get the distribution
-        distribution = F.softmax(final_output.squeeze(-1), dim=-1)
+        # distribution = F.softmax(final_output.squeeze(-1), dim=-1)
 
-        return distribution
+        return final_output
     
 def get_logger(exp_id, log_path):
-    #logger = logging.getLogger(f"Experiment_{exp_id}")
     logger = logging.getLogger('main')
     if not logger.handlers:
         logger.setLevel(logging.INFO)
