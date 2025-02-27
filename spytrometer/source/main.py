@@ -55,12 +55,13 @@ if  __name__ == "__main__":
         exit(-1)
 
     transformer_model = Transformer(device=device, num_heads=num_heads, num_layers=num_layers, d_model=model_dim)
-    plogger.info(f"The model:\n{transformer_model}")
     optimizer = torch.optim.Adam(transformer_model.parameters(), lr=1e-3)
-    plogger.info(f"The optimizer:\n{optimizer}")
     optimizer.zero_grad()            
 
     loss_fn = nn.CrossEntropyLoss().to(device)
+    plogger.info(f"The model:\n{transformer_model}")
+    plogger.info(f"The optimizer:\n{optimizer}")
+    plogger.info(f"The loss function :\n{loss_fn}")
 
     data_dir = "/blob/dda/PXD028806/"
     pickle_file_path = data_dir + "training_data/"
@@ -83,6 +84,7 @@ if  __name__ == "__main__":
             plogger.info(f"Reading training data file:  {training_data_file}, Data read: {len(data)}")
             file_loss = 0.0
 
+            random.shuffle(data)
             # Iterate over the training data
             for index, data_item in data.iterrows():
 
