@@ -19,11 +19,11 @@ import sys
 # from utils import get_logger, code_backup
 from torch.utils.tensorboard import SummaryWriter
 import shutil
-from model import Transformer
-from model import generate_uuid
-from model import get_logger
-from model import remove_brackets
-from model import add_random_letters
+from model_with_pos_encoding import Transformer
+from model_with_pos_encoding import generate_uuid
+from model_with_pos_encoding import get_logger
+from model_with_pos_encoding import remove_brackets
+from model_with_pos_encoding import add_random_letters
 
 if  __name__ == "__main__":
 
