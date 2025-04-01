@@ -17,9 +17,34 @@ import logging
 # from utils import get_logger, code_backup
 # from torch.utils.tensorboard import SummaryWriter
 
-class PositionalEncoding(nn.Module):
+class PeakEncoding(nn.Module):
+    def __init__(self, device, d_model=64):
+        super(PeakEncoding, self).__init__()
+        self.d_model = d_model
+        self.device = device
+
+        # Ensure that the d_model is even
+        assert d_model % 2 == 0, "d_model should be an even number"
+
+    def forward(self, mz_values):
+        # Prepare a tensor for m/z values
+        mz_tensor = torch.tensor(mz_values, device=self.device, dtype=torch.float32).unsqueeze(1)  # shape: (n_peaks, 1)
+        mz_tensor = mz_tensor.view(-1, 1) # reshaping 
+        # Compute the positional encoding
+        div_term = torch.exp(torch.arange(0, self.d_model, 2, device=self.device) * (-math.log(10000.0) / self.d_model))
+        mz_tensor = mz_tensor.expand(-1, div_term.size(0))  # shape: (n_peaks, d_model//2)
+        pe_sin = torch.sin(mz_tensor * div_term)  # shape: (n_peaks, d_model/2)
+        pe_cos = torch.cos(mz_tensor * div_term)  # shape: (n_peaks, d_model/2)
+        
+        # Concatenate sine and cosine encodings
+        pe = torch.cat((pe_sin, pe_cos), dim=1)  # shape: (n_peaks, d_model)
+
+        return pe
+
+
+class PeakEncodingWithDistances(nn.Module):
     def __init__(self, d_model=64, device='cuda'):
-        super(PositionalEncoding, self).__init__()
+        super(PeakEncodingWithDistances, self).__init__()
         self.d_model = d_model
         self.device = device
 
@@ -104,9 +129,9 @@ class PositionalEncoding(nn.Module):
         return encoding
 
 
-class Embedding(nn.Module):
+class AAEmbedding(nn.Module):
     def __init__(self, device, embedding_dim=64):
-        super(Embedding, self).__init__()
+        super(AAEmbedding, self).__init__()
         self.embedding_dim = embedding_dim
         self.device = device
         # creating a dictionary to map amino acids to indices
@@ -209,11 +234,11 @@ class Decoder(nn.Module):
 class Transformer(nn.Module):
     def __init__(self, device, d_model=64, num_heads=8, num_layers=6):
         super(Transformer, self).__init__()
-        self.encoder_positional_encoding = PositionalEncoding(d_model, device)
+        self.encoder_positional_encoding = PeakEncodingWithDistances(d_model, device)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads).to(device)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers).to(device)
         
-        self.decoder_embedding = Embedding(device, embedding_dim=d_model)  # embedding_dim is 64
+        self.decoder_embedding = AAEmbedding(device, embedding_dim=d_model)  # embedding_dim is 64
         self.decoder = Decoder(d_model, num_heads, num_layers).to(device)
         
         self.final_layer = nn.Linear(d_model, 1).to(device)  # Output size is 1 for the center prediction
