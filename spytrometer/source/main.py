@@ -84,7 +84,8 @@ if  __name__ == "__main__":
             plogger.info(f"Reading training data file:  {training_data_file}, Data read: {len(data)}")
             file_loss = 0.0
 
-            random.shuffle(data)
+            # random.shuffle(data)
+            data.sample(frac=1).reset_index(drop=True)  
             # Iterate over the training data
             for index, data_item in data.iterrows():
 
