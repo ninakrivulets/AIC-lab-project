@@ -30,7 +30,7 @@ class ProteinCollection:
             # saving the starting position
             self.position_dict[str(record.id)] = len(self.long_sequence) - len(str(record.seq))
             cnt += 1
-            print('Finished with', cnt)
+            # print('Finished with', cnt)
 
     def save_to_pickle(self, file_path):
         # saving the merged sequence and the dict to pickle file
@@ -42,12 +42,12 @@ class ProteinCollection:
 
 protein_collector = ProteinCollection()
 
-path_to_fasta = "/home/data/Fasta/uniprot-proteome_UP000005640_canonical_isoforms.fasta"
+path_to_fasta = "/home/data/Fasta/uniprot-proteome_UP000005640+reviewed_yes.fasta"
 
 # loading data from fasta file
 protein_collector.load_fasta(path_to_fasta)
 
-pickle_file_path = "/home/ninak/data/protein_data.pkl"
+pickle_file_path = "/home/data/Fasta/uniprot-proteome_UP000005640+reviewed_yes.pkl"
 protein_collector.save_to_pickle(pickle_file_path)
 
 

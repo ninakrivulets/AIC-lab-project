@@ -136,18 +136,24 @@ class AAEmbedding(nn.Module):
         self.device = device
         # creating a dictionary to map amino acids to indices
         self.amino_acids = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 
-                            'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
+                            'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y',
+                            'X', 'O','U']
+
         self.aa_to_idx = {aa: idx for idx, aa in enumerate(self.amino_acids)}
         
         # an embedding layer
         self.embedding_layer = nn.Embedding(num_embeddings=len(self.amino_acids), embedding_dim=self.embedding_dim).to(device)
+        window = 5
+        self.proteome_kernel = nn.Conv1d(in_channels=self.embedding_dim, out_channels=self.embedding_dim, kernel_size=window*2+1, padding=window, stride=window).to(device)
 
     def forward(self, sequence):
         # Convert sequence to indices
         sequence_indices = torch.tensor([self.aa_to_idx[aa] for aa in sequence], device=self.device)
         # Pass the indices through the embedding layer
-        embedded_sequence = self.embedding_layer(sequence_indices)
-        return embedded_sequence.unsqueeze(0)  # Adding batch dimension
+        embedded_sequence = self.embedding_layer(sequence_indices).unsqueeze(0).transpose(1,2)
+        # print(embedded_sequence.shape)
+        embedded_sequence = self.proteome_kernel(embedded_sequence).transpose(1,2)
+        return embedded_sequence # Adding batch dimension
     
 
 class MultiHeadAttention(nn.Module):

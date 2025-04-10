@@ -22,6 +22,7 @@ import shutil
 from model_with_pos_encoding import Transformer
 from model_with_pos_encoding import generate_uuid
 from model_with_pos_encoding import get_logger
+from model_with_pos_encoding import AAEmbedding
 from model_with_pos_encoding import remove_brackets
 from model_with_pos_encoding import add_random_letters
 
@@ -40,7 +41,7 @@ if  __name__ == "__main__":
     plogger.info("TensorBoard writer initialized.")
 
 
-    GPU_ID = 1
+    GPU_ID = 0
     device = torch.device("cuda:"+str(GPU_ID) if torch.cuda.is_available() else "cpu")
     plogger.info(f"Torch version: {torch.__version__}")
     plogger.info(f"Torch device: {device}")
@@ -73,8 +74,20 @@ if  __name__ == "__main__":
     max_training_step = 1e6  # This could be 1e9 or something like this
     batch_size = 8
 
+    with open('/home/data/Fasta/uniprot-proteome_UP000005640+reviewed_yes.pkl', 'rb') as f:  # 'rb' = read binary
+        data = pickle.load(f)
+        proteome_seq = data['long_sequence']
+        proteome_pos = data['position_dict']
+    plogger.info(f"Proteome length: {len(proteome_seq)}")
+    plogger.info(f"Number of proteins: {len(proteome_pos)}")
+
+    # decoder_embedding = AAEmbedding(device, embedding_dim=model_dim)  # embedding_dim is 64    
+    # prote = decoder_embedding(proteome_seq)
+    # print(prot.shape)
+    # exit()
     while True:
         plogger.info(f"New epoch has started!")
+        
 
         # Iterate over the training data files
         for training_data_file in training_data:
@@ -91,22 +104,38 @@ if  __name__ == "__main__":
 
                 peaks_mz = data_item.mz_values
                 sequence = data_item.sequence
-                sequence_pain = remove_brackets(data_item.sequence)
+                sequence_ids = data_item.protein_ids
+                targets = []
+                for prot_id in sequence_ids.keys():
+                    if prot_id in proteome_pos:
+                        protein_position = proteome_pos[prot_id]
+                        peptide_position = protein_position + (sequence_ids[prot_id]['start'] + sequence_ids[prot_id]['end'])//2
+                        # print("the position:", proteome_pos[prot_id])
+                        # print("peptide id start:", sequence_ids[prot_id]['start'])
+                        # print("peptide id start:", sequence_ids[prot_id]['end'])
+                        # print("peptide_position:",peptide_position )
+                        targets.append(peptide_position)
+                print(targets)
+                if len(targets) == 0:
+                    continue
+
+
+
 
                 # plogger.info(f"Peptide seq: {sequence}")  
                 # plogger.info(f"Peptide sequence: {sequence_pain}")
                 # plogger.info(f"Speactrum peak num: {len(peaks_mz)}") 
                 # plogger.info(f"Speactrum peaks: {peaks_mz}") 
                 
-                decoder_input = add_random_letters(sequence_pain)        
+                # decoder_input = add_random_letters(sequence_pain)        
                 # plogger.info(f"Decoder input sequence: {decoder_input}")
 
                 # Forward pass                
-                output_distribution = transformer_model(peaks_mz, decoder_input)
+                output_distribution = transformer_model(peaks_mz, proteome_seq)
                 # plogger.info(f"Model output distribution: {output_distribution}")
             
                 # Loss function
-                target_position = len(decoder_input) // 2
+                target_position = targets[0]
                 target = torch.tensor(target_position, device=device, dtype=torch.long).unsqueeze(dim=0)
                 loss = loss_fn(output_distribution.view(-1, output_distribution.size(-1)), target)
 
