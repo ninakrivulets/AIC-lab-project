@@ -130,7 +130,7 @@ class PeakEncodingWithDistances(nn.Module):
 
 
 class AAEmbedding(nn.Module):
-    def __init__(self, device, embedding_dim=64):
+    def __init__(self, device, embedding_dim=64, kernel_stride=7):
         super(AAEmbedding, self).__init__()
         self.embedding_dim = embedding_dim
         self.device = device
@@ -143,8 +143,8 @@ class AAEmbedding(nn.Module):
         
         # an embedding layer
         self.embedding_layer = nn.Embedding(num_embeddings=len(self.amino_acids), embedding_dim=self.embedding_dim).to(device)
-        window = 5
-        self.proteome_kernel = nn.Conv1d(in_channels=self.embedding_dim, out_channels=self.embedding_dim, kernel_size=window*2+1, padding=window, stride=window).to(device)
+        
+        self.proteome_kernel = nn.Conv1d(in_channels=self.embedding_dim, out_channels=self.embedding_dim, kernel_size=kernel_stride*2+1, padding=kernel_stride, stride=kernel_stride).to(device)
 
     def forward(self, sequence):
         # Convert sequence to indices
@@ -238,13 +238,13 @@ class Decoder(nn.Module):
         return x
 
 class Transformer(nn.Module):
-    def __init__(self, device, d_model=64, num_heads=8, num_layers=6):
+    def __init__(self, device, d_model=64, num_heads=8, num_layers=6, kernel_stride=7):
         super(Transformer, self).__init__()
         self.encoder_positional_encoding = PeakEncodingWithDistances(d_model, device)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads).to(device)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers).to(device)
         
-        self.decoder_embedding = AAEmbedding(device, embedding_dim=d_model)  # embedding_dim is 64
+        self.decoder_embedding = AAEmbedding(device, embedding_dim=d_model, kernel_stride=kernel_stride)  # embedding_dim is 64
         self.decoder = Decoder(d_model, num_heads, num_layers).to(device)
         
         self.final_layer = nn.Linear(d_model, 1).to(device)  # Output size is 1 for the center prediction
@@ -267,6 +267,18 @@ class Transformer(nn.Module):
 
         return final_output
     
+
+class MultiTargetLoss(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, prediction, targets):
+        
+        target_lse = torch.logsumexp(prediction[targets], dim=0)
+        lse = torch.logsumexp(prediction, dim=0)
+
+        return lse - target_lse
+        
 def get_logger(exp_id, log_path):
     logger = logging.getLogger('main')
     if not logger.handlers:
