@@ -17,10 +17,9 @@ import logging
 # from utils import get_logger, code_backup
 # from torch.utils.tensorboard import SummaryWriter
 
-
-class PositionalEncoding(nn.Module):
+class PeakEncoding(nn.Module):
     def __init__(self, device, d_model=64):
-        super(PositionalEncoding, self).__init__()
+        super(PeakEncoding, self).__init__()
         self.d_model = d_model
         self.device = device
 
@@ -43,26 +42,164 @@ class PositionalEncoding(nn.Module):
         return pe
 
 
-class Embedding(nn.Module):
-    def __init__(self, device, embedding_dim=64):
-        super(Embedding, self).__init__()
+class PeakEncodingWithDistances(nn.Module):
+    def __init__(self, d_model=64, device='cuda'):
+        super(PeakEncodingWithDistances, self).__init__()
+        self.d_model = d_model
+        self.device = device
+
+        assert d_model % 2 == 0, "d_model should be an even number"
+
+        # Amino acid mass dictionary
+        self.aa_mass = {
+            "G": 57.02146, "A": 71.03711, "S": 87.03203, "P": 97.05276, "V": 99.06841,
+            "T": 101.04768, "C": 103.00919, "L": 113.08406, "I": 113.08406, "N": 114.04293,
+            "D": 115.02694, "Q": 128.05858, "K": 128.09496, "E": 129.04259, "M": 131.04049,
+            "H": 137.05891, "F": 147.06841, "U": 150.95364, "R": 156.10111, "Y": 163.06333,
+            "W": 186.07931, "1": 147.035399, "2": 166.998359435, "3": 181.014009505,
+            "4": 243.029659575, "5": 170.10552805, "6": 170.11676105, "7": 142.11061305
+        }
+
+        # Convert masses to tensor
+        self.aa_masses_tensor = torch.tensor(list(self.aa_mass.values()), device=self.device)
+
+    def dist_matrix(self, array):
+        #array = torch.tensor(array, device=self.device)
+        length = array.shape[0]  # Expecting an array of at least 1D (150,)
+        
+        matrix_1 = array.unsqueeze(0).expand(length, -1)  # First matrix with the array in the rows
+        matrix_2 = array.unsqueeze(1).expand(-1, length)  # Matrix with the array in the columns
+        diff = torch.abs(matrix_1 - matrix_2)  # Distance matrix
+        return diff
+
+    def tri_cube(self, array):
+        #array = torch.tensor(array, dtype=torch.float32, device=self.device)
+        array = torch.abs(array / 0.05)
+        value = torch.where(array <= 1, (1 - array ** 3) ** 3, torch.tensor(0.0, device=self.device))
+        return value
+
+    def forward(self, mz_values):
+        mz_values = torch.tensor(mz_values, device=self.device, dtype=torch.float32)  # Convert m/z values to tensor
+        mz_tensor = mz_values.unsqueeze(1)  # shape: (150, 1)
+        # Calculate distance matrices for m/z values
+        #diff_matrices = []
+        #for mz_value in mz_values:
+        diff_matrices = self.dist_matrix(mz_values)
+        #diff_matrices.append(diff_matrix)
+
+        #diff_matrices = torch.tensor(diff_matrix)  # shape: (150, 150, 150)
+
+        # Calculate mass difference matrices for each amino acid mass
+        mass_diff_matrices = []
+        for mass in self.aa_masses_tensor:
+            mass_diff_matrix = torch.abs(diff_matrices - mass)  # shape: (150, 150, 150)
+            mass_diff_matrices.append(mass_diff_matrix)  # list of 28 tensors
+
+        # Stack to get a tensor of shape (28, 150, 150, 150)
+        mass_diff_matrices = torch.stack(mass_diff_matrices)  # shape: (28, 150, 150)
+        #print('Mass diff shape', mass_diff_matrices.shape)
+        # Apply tri-cube function to match mass differences
+        match_matrices = self.tri_cube(mass_diff_matrices) # shape (28, 150, 150)
+
+        # Create mask for diagonal elements
+        diag_mask = torch.eye(match_matrices.shape[1], match_matrices.shape[2], dtype=torch.bool, device=self.device)  # shape: (150, 150)
+
+        # Expand mask to (28, 150, 150)
+        diag_mask = diag_mask.unsqueeze(0).expand(match_matrices.shape[0], -1, -1)  # shape: (28, 150, 150)
+
+        # Set diagonal values to 1
+        match_matrices[diag_mask] = 1.0 # shape (28, 150, 150)
+        #match_matrices = match_matrices.permute(2, 1, 0)  #(150, 150,  28) 
+        # Compute the positional encoding
+        div_term = torch.exp(torch.arange(0, self.d_model, 2, device=self.device) * (-math.log(10000.0) / self.d_model))
+        div_term = div_term.unsqueeze(0).unsqueeze(2)  # shape: (1, d_model/2, 1)
+        #mz_tensor = mz_tensor.expand(-1, div_term.size(0), -1)  # shape: (150, d_model//2, 1)
+        mz_tensor = mz_tensor.unsqueeze(1)  # shape: (150, 1, 1)
+        mz_tensor = mz_tensor.repeat(1, div_term.size(1), 1)  # shape: (150, d_model//2=32, 1)
+
+        pe_sin = torch.sin(mz_tensor * div_term)  # shape: (150, d_model/2)
+        pe_cos = torch.cos(mz_tensor * div_term)  # shape: (150, d_model/2)
+
+        # Concatenate sine and cosine encodings
+        pe = torch.cat((pe_sin, pe_cos), dim=1)  # shape: (150, d_model, 1)
+        pe_p = pe.squeeze(2) #shape (150, 64)
+        result = torch.matmul(match_matrices, pe_p) #shape (28, 150, 64)
+        encoding = torch.sum(result, dim=0)
+
+        return encoding
+
+
+class AAEmbedding(nn.Module):
+    def __init__(self, device, embedding_dim=64, window_size = 300, stride = 150):
+        super(AAEmbedding, self).__init__()
         self.embedding_dim = embedding_dim
         self.device = device
+        self.window_size = window_size
+        self.stride = stride
         # creating a dictionary to map amino acids to indices
         self.amino_acids = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 
-                            'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
+                            'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y', 'U']
         self.aa_to_idx = {aa: idx for idx, aa in enumerate(self.amino_acids)}
         
         # an embedding layer
         self.embedding_layer = nn.Embedding(num_embeddings=len(self.amino_acids), embedding_dim=self.embedding_dim).to(device)
 
     def forward(self, sequence):
+        sequence = remove_brackets(sequence)
+        # Creating sliding windows
+        if len(sequence) < self.window_size:
+            chunks = [sequence]  # Use the whole sequence as one chunk
+        else:
+            chunks = [sequence[i:i+self.window_size]
+                    for i in range(0, len(sequence) - self.window_size + 1, self.stride)]
+
+        all_embeddings = []
+        for chunk in chunks:
+            try:
+                indices = torch.tensor(
+                    [self.aa_to_idx[aa] for aa in chunk],
+                    device=self.device
+                )
+            except KeyError as e:
+                raise ValueError(f"Invalid amino acid '{e.args[0]}' in input sequence.")
+
+            embedded = self.embedding_layer(indices).unsqueeze(0)  # shape: (1, window_size, embedding_dim)
+            all_embeddings.append(embedded)
+
+        if not all_embeddings:
+            raise ValueError(f"No valid embedding windows created from sequence: {sequence}")
+
+        return torch.stack(all_embeddings)
+
+    '''
+    def forward(self, sequence):
+        # Creating sliding windows
+        chunks = [sequence[i:i+self.window_size]
+                  for i in range(0, len(sequence) - self.window_size + 1, self.stride)]
+
+        all_embeddings = []
+        for chunk in chunks:
+            try:
+                indices = torch.tensor(
+                    [self.aa_to_idx[aa] for aa in chunk],
+                    device=self.device
+                )
+            except KeyError as e:
+                raise ValueError(f"Invalid amino acid '{e.args[0]}' in input sequence.")
+
+            embedded = self.embedding_layer(indices).unsqueeze(0)  # shape: (1, window_size, embedding_dim)
+            all_embeddings.append(embedded)
+
+        return torch.stack(all_embeddings)  # shape: (num_chunks, 1, window_size, embedding_dim)
+        '''
+    '''
+    def forward(self, sequence):
         # Convert sequence to indices
         sequence_indices = torch.tensor([self.aa_to_idx[aa] for aa in sequence], device=self.device)
         # Pass the indices through the embedding layer
         embedded_sequence = self.embedding_layer(sequence_indices)
         return embedded_sequence.unsqueeze(0)  # Adding batch dimension
-    
+    '''
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, num_heads):
@@ -93,10 +230,10 @@ class MultiHeadAttention(nn.Module):
 
         attention_output = attention_output.permute(0, 2, 1, 3).contiguous().view(batch_size, -1, self.d_model)
         # permute(0, 2, 1, 3) changes dimensions so:
-         #0-ая ось (batch_size) stays,
-         #2-ая ось (seq_length) становится 1-ой,
-         #1-ая ось (num_heads) становится 2-ой,
-         # 3-я ось (depth) остается на месте.
+         #0- axis (batch_size) stays,
+         #2-axis (seq_length) becomes 1,
+         #1-axis (num_heads) becomes 2,
+         # 3-я axis (depth) stays.
          # we get tensor with shape (batch_size, seq_len_q, num_heads, depth).
         return self.dense(attention_output)
 
@@ -121,8 +258,38 @@ class DecoderLayer(nn.Module):
         self.layernorm3 = nn.LayerNorm(d_model)
 
     def forward(self, x, enc_output):
+        # x shape: (num_chunks, 1, window_size, d_model)
+        B, _, L, D = x.shape
+        x = x.squeeze(1)  # (B, L, D)
+
+        # Conv1D expects input shape: (B, D, L)
+        x_permuted = x.permute(0, 2, 1)  # (B, D, L)
+        conv_output = self.conv1d(x_permuted)  # (B, D, L)
+        conv_output = conv_output.permute(0, 2, 1)  # (B, L, D)
+
+        x = self.layernorm1(x + conv_output)
+
+        # Ensure enc_output is broadcastable: (1, enc_len, d_model) → (B, enc_len, d_model)
+        if enc_output.dim() == 2:
+            enc_output = enc_output.unsqueeze(0).expand(B, -1, -1)
+        elif enc_output.size(0) == 1:
+            enc_output = enc_output.expand(B, -1, -1)
+
+        attn2 = self.mha2(x, enc_output, enc_output)
+        x = self.layernorm2(x + attn2)
+
+        ffn_output = self.ffn(x)
+        output = self.layernorm3(x + ffn_output)
+
+        # Optionally add back 1 dimension for consistency
+        return output.unsqueeze(1)  # shape: (B, 1, L, D)
+
+'''
+    def forward(self, x, enc_output):
+        
         # attn1 = self.mha1(x, x, x)
         # print(x.shape) # is [1, 24, 64]
+        print(x.shape) # ([75781, 1, 300, 48])
         x = x.permute(0, 2, 1)  # Change shape from (batch, seq_len, d_model) to (batch, d_model, seq_len)
         # print(x.shape) # is ([1, 64, 24])
         conv_output = self.conv1d(x)
@@ -134,6 +301,24 @@ class DecoderLayer(nn.Module):
         x = self.layernorm2(x + attn2)  # Residual connection
         ffn_output = self.ffn(x)
         return self.layernorm3(x + ffn_output)  # Residual connection
+        
+        print(x.shape) # ([75781, 1, 300, 48])
+        x = x.permute(0, 1, 2, 3)
+        print(x.shape)
+        x = x.permute(0, 3, 2, 1)
+        print(x.shape)
+        conv_output = self.conv1d(x)
+        # print(conv_output.shape) # is [1, 64, 24]
+        conv_output = conv_output.permute(0, 2, 1)  # Change shape back to (batch, seq_len, d_model)
+        x = x.permute(0, 2, 1) # shape [1, 24, 64]
+        x = self.layernorm1(x + conv_output)  # Residual connection
+        attn2 = self.mha2(x, enc_output, enc_output)
+        x = self.layernorm2(x + attn2)  # Residual connection
+        ffn_output = self.ffn(x)
+        return self.layernorm3(x + ffn_output)  # Residual connection
+'''
+
+
 
 class Decoder(nn.Module):
     def __init__(self, d_model, num_heads, num_layers):
@@ -148,11 +333,11 @@ class Decoder(nn.Module):
 class Transformer(nn.Module):
     def __init__(self, device, d_model=64, num_heads=8, num_layers=6):
         super(Transformer, self).__init__()
-        self.encoder_positional_encoding = PositionalEncoding(device, d_model)
+        self.encoder_positional_encoding = PeakEncodingWithDistances(d_model, device)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads).to(device)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers).to(device)
         
-        self.decoder_embedding = Embedding(device, embedding_dim=d_model)  # embedding_dim is 64
+        self.decoder_embedding = AAEmbedding(device, embedding_dim=d_model)  # embedding_dim is 64
         self.decoder = Decoder(d_model, num_heads, num_layers).to(device)
         
         self.final_layer = nn.Linear(d_model, 1).to(device)  # Output size is 1 for the center prediction
