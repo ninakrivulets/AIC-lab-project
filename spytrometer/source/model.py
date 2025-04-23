@@ -130,19 +130,21 @@ class PeakEncodingWithDistances(nn.Module):
 
 
 class AAEmbedding(nn.Module):
-    def __init__(self, device, embedding_dim=64, window_size = 300, stride = 150):
+    def __init__(self, device, embedding_dim=64, window_size = 2000000000, kernel_stride=7):
         super(AAEmbedding, self).__init__()
         self.embedding_dim = embedding_dim
         self.device = device
-        self.window_size = window_size
-        self.stride = stride
         # creating a dictionary to map amino acids to indices
         self.amino_acids = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 
-                            'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y', 'U']
+                            'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y',
+                            'X', 'O','U']
+
         self.aa_to_idx = {aa: idx for idx, aa in enumerate(self.amino_acids)}
         
         # an embedding layer
         self.embedding_layer = nn.Embedding(num_embeddings=len(self.amino_acids), embedding_dim=self.embedding_dim).to(device)
+        
+        #self.proteome_kernel = nn.Conv1d(in_channels=self.embedding_dim, out_channels=self.embedding_dim, kernel_size=kernel_stride*2+1, padding=kernel_stride, stride=kernel_stride).to(device)
 
     def forward(self, sequence):
         sequence = remove_brackets(sequence)
@@ -170,36 +172,7 @@ class AAEmbedding(nn.Module):
             raise ValueError(f"No valid embedding windows created from sequence: {sequence}")
 
         return torch.stack(all_embeddings)
-
-    '''
-    def forward(self, sequence):
-        # Creating sliding windows
-        chunks = [sequence[i:i+self.window_size]
-                  for i in range(0, len(sequence) - self.window_size + 1, self.stride)]
-
-        all_embeddings = []
-        for chunk in chunks:
-            try:
-                indices = torch.tensor(
-                    [self.aa_to_idx[aa] for aa in chunk],
-                    device=self.device
-                )
-            except KeyError as e:
-                raise ValueError(f"Invalid amino acid '{e.args[0]}' in input sequence.")
-
-            embedded = self.embedding_layer(indices).unsqueeze(0)  # shape: (1, window_size, embedding_dim)
-            all_embeddings.append(embedded)
-
-        return torch.stack(all_embeddings)  # shape: (num_chunks, 1, window_size, embedding_dim)
-        '''
-    '''
-    def forward(self, sequence):
-        # Convert sequence to indices
-        sequence_indices = torch.tensor([self.aa_to_idx[aa] for aa in sequence], device=self.device)
-        # Pass the indices through the embedding layer
-        embedded_sequence = self.embedding_layer(sequence_indices)
-        return embedded_sequence.unsqueeze(0)  # Adding batch dimension
-    '''
+    
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, num_heads):
@@ -233,12 +206,12 @@ class MultiHeadAttention(nn.Module):
          #0- axis (batch_size) stays,
          #2-axis (seq_length) becomes 1,
          #1-axis (num_heads) becomes 2,
-         # 3-я axis (depth) stays.
+         # 3 axis (depth) stays.
          # we get tensor with shape (batch_size, seq_len_q, num_heads, depth).
         return self.dense(attention_output)
 
 class FeedForward(nn.Module):
-    def __init__(self, d_model, d_ff=2048):
+    def __init__(self, d_model, d_ff=128):
         super(FeedForward, self).__init__()
         self.linear1 = nn.Linear(d_model, d_ff)
         self.linear2 = nn.Linear(d_ff, d_model)
@@ -258,38 +231,8 @@ class DecoderLayer(nn.Module):
         self.layernorm3 = nn.LayerNorm(d_model)
 
     def forward(self, x, enc_output):
-        # x shape: (num_chunks, 1, window_size, d_model)
-        B, _, L, D = x.shape
-        x = x.squeeze(1)  # (B, L, D)
-
-        # Conv1D expects input shape: (B, D, L)
-        x_permuted = x.permute(0, 2, 1)  # (B, D, L)
-        conv_output = self.conv1d(x_permuted)  # (B, D, L)
-        conv_output = conv_output.permute(0, 2, 1)  # (B, L, D)
-
-        x = self.layernorm1(x + conv_output)
-
-        # Ensure enc_output is broadcastable: (1, enc_len, d_model) → (B, enc_len, d_model)
-        if enc_output.dim() == 2:
-            enc_output = enc_output.unsqueeze(0).expand(B, -1, -1)
-        elif enc_output.size(0) == 1:
-            enc_output = enc_output.expand(B, -1, -1)
-
-        attn2 = self.mha2(x, enc_output, enc_output)
-        x = self.layernorm2(x + attn2)
-
-        ffn_output = self.ffn(x)
-        output = self.layernorm3(x + ffn_output)
-
-        # Optionally add back 1 dimension for consistency
-        return output.unsqueeze(1)  # shape: (B, 1, L, D)
-
-'''
-    def forward(self, x, enc_output):
-        
         # attn1 = self.mha1(x, x, x)
         # print(x.shape) # is [1, 24, 64]
-        print(x.shape) # ([75781, 1, 300, 48])
         x = x.permute(0, 2, 1)  # Change shape from (batch, seq_len, d_model) to (batch, d_model, seq_len)
         # print(x.shape) # is ([1, 64, 24])
         conv_output = self.conv1d(x)
@@ -301,24 +244,6 @@ class DecoderLayer(nn.Module):
         x = self.layernorm2(x + attn2)  # Residual connection
         ffn_output = self.ffn(x)
         return self.layernorm3(x + ffn_output)  # Residual connection
-        
-        print(x.shape) # ([75781, 1, 300, 48])
-        x = x.permute(0, 1, 2, 3)
-        print(x.shape)
-        x = x.permute(0, 3, 2, 1)
-        print(x.shape)
-        conv_output = self.conv1d(x)
-        # print(conv_output.shape) # is [1, 64, 24]
-        conv_output = conv_output.permute(0, 2, 1)  # Change shape back to (batch, seq_len, d_model)
-        x = x.permute(0, 2, 1) # shape [1, 24, 64]
-        x = self.layernorm1(x + conv_output)  # Residual connection
-        attn2 = self.mha2(x, enc_output, enc_output)
-        x = self.layernorm2(x + attn2)  # Residual connection
-        ffn_output = self.ffn(x)
-        return self.layernorm3(x + ffn_output)  # Residual connection
-'''
-
-
 
 class Decoder(nn.Module):
     def __init__(self, d_model, num_heads, num_layers):
@@ -331,13 +256,13 @@ class Decoder(nn.Module):
         return x
 
 class Transformer(nn.Module):
-    def __init__(self, device, d_model=64, num_heads=8, num_layers=6):
+    def __init__(self, device, d_model=64, num_heads=8, num_layers=6, kernel_stride=7):
         super(Transformer, self).__init__()
         self.encoder_positional_encoding = PeakEncodingWithDistances(d_model, device)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads).to(device)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers).to(device)
         
-        self.decoder_embedding = AAEmbedding(device, embedding_dim=d_model)  # embedding_dim is 64
+        self.decoder_embedding = AAEmbedding(device, embedding_dim=d_model, kernel_stride=kernel_stride)  # embedding_dim is 64
         self.decoder = Decoder(d_model, num_heads, num_layers).to(device)
         
         self.final_layer = nn.Linear(d_model, 1).to(device)  # Output size is 1 for the center prediction
@@ -360,6 +285,18 @@ class Transformer(nn.Module):
 
         return final_output
     
+
+class MultiTargetLoss(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, prediction, targets):
+        
+        target_lse = torch.logsumexp(prediction[targets], dim=0)
+        lse = torch.logsumexp(prediction, dim=0)
+
+        return lse - target_lse
+        
 def get_logger(exp_id, log_path):
     logger = logging.getLogger('main')
     if not logger.handlers:
