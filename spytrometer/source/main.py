@@ -85,10 +85,12 @@ if  __name__ == "__main__":
     plogger.info(f"Proteome length: {len(proteome_seq)}")
     plogger.info(f"Number of proteins: {len(proteome_pos)}")
 
+    with open('/home/ninak/protein_seq_dict.pkl', 'rb') as f:  # 'rb' = read binary
+        protein_id_seq_dict = pickle.load(f)
+    plogger.info(f"Loaded dictionary with {len(protein_id_seq_dict)} entries.")
+
     while True:
         plogger.info(f"New epoch has started!")
-        
-
         # Iterate over the training data files
         for training_data_file in training_data:
             
@@ -105,8 +107,8 @@ if  __name__ == "__main__":
                 peaks_mz = data_item.mz_values
                 sequence = data_item.sequence
                 sequence_ids = data_item.protein_ids
-                targets = []
-                for prot_id in sequence_ids.keys():
+                #targets = []
+                for prot_id, pos_dict in sequence_ids.items():
                     if prot_id in proteome_pos:
                         protein_position = proteome_pos[prot_id]
                         peptide_positions = list(range((protein_position+sequence_ids[prot_id]['start'])// kernel_stride, (protein_position+sequence_ids[prot_id]['end'])//kernel_stride))
