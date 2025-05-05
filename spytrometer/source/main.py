@@ -1,157 +1,105 @@
-import logging
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import math
-import pandas as pd
-import os
-import glob
-import re
-import pyopenms as oms
-import matplotlib.pyplot as plt
+import os, glob, pickle, sys, logging
+import torch, torch.nn as nn
 import numpy as np
-import random
-import string
-import uuid
-import base64
-import pickle
-import sys
-# from utils import get_logger, code_backup
 from torch.utils.tensorboard import SummaryWriter
-import shutil
-from model_with_pos_encoding import Transformer
-from model_with_pos_encoding import generate_uuid
-from model_with_pos_encoding import get_logger
-# from model_with_pos_encoding import AAEmbedding
-from model_with_pos_encoding import MultiTargetLoss
-# from model_with_pos_encoding import remove_brackets
-# from model_with_pos_encoding import add_random_letters
 
-if  __name__ == "__main__":
+from model_with_pos_encoding_n import (
+    Transformer,
+    generate_uuid,
+    get_logger,
+    MultiTargetLoss,
+)
 
-    exp_id = generate_uuid()
-    exp_dir = '../checkpoints/'+exp_id
+GPU_ID = 0
+BATCH_SIZE = 8
+MAX_STEPS = int(1e6)
+LEARNING_RATE = 1e-3
 
-    if not os.path.exists(exp_dir):
-        os.makedirs(exp_dir)
+device = torch.device(f"cuda:{GPU_ID}" if torch.cuda.is_available() else "cpu")
+exp_id = generate_uuid()
+exp_dir = f"home/ninak/checkpoints/{exp_id}"
+os.makedirs(exp_dir, exist_ok=True)
 
-    plogger = get_logger(exp_id=exp_id, log_path=exp_dir)
-    plogger.info(f"Experiment ID: {exp_id}")
+logger = get_logger(exp_id=exp_id, log_path=exp_dir)
+logger.info(f"Experiment ID: {exp_id}")
+logger.info(f"Using device {device}")
 
-    tensorboard_writer = SummaryWriter(log_dir=f"{exp_dir}")
-    plogger.info("TensorBoard writer initialized.")
+writer = SummaryWriter(log_dir=exp_dir)
+logger.info("TensorBoard writer initialized.")
 
+num_heads = 4
+num_layers = 3
+model_dim = 32
+if model_dim % num_heads:
+    logger.error("Model_dim must be divisible by num_heads. Terminating with error")
+    sys.exit(1)
 
-    GPU_ID = 0
-    device = torch.device("cuda:"+str(GPU_ID) if torch.cuda.is_available() else "cpu")
-    plogger.info(f"Torch version: {torch.__version__}")
-    plogger.info(f"Torch device: {device}")
-    num_heads = 4
-    num_layers = 3
-    model_dim = 32
-    kernel_stride = 11 # Used in proteome embedding to reduce the proteom length.
-    plogger.info(f"Model num head: {num_heads}")
-    plogger.info(f"Model num layer: {num_layers}")
-    plogger.info(f"Model dim : {model_dim}")
-    plogger.info(f"Kernel stride in proteome embedding: {kernel_stride}")
-    if model_dim % num_heads > 0 :
-        plogger.info(f"Model dim is not dividable with head num. Terminating with error.")
-        exit(-1)
+model = Transformer(device=device,
+                        num_heads=num_heads,
+                        num_layers=num_layers,
+                        d_model=model_dim).to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+loss_fn = MultiTargetLoss().to(device)
 
-    transformer_model = Transformer(device=device, num_heads=num_heads, num_layers=num_layers, d_model=model_dim, kernel_stride=kernel_stride)
-    optimizer = torch.optim.Adam(transformer_model.parameters(), lr=1e-3)
-    optimizer.zero_grad()            
+logger.info(f"Model:\n{model}")
+logger.info(f"Optimizer: {optimizer}")
+logger.info(f"Loss: {loss_fn}")
 
-    loss_fn = MultiTargetLoss().to(device)
-    plogger.info(f"The model:\n{transformer_model}")
-    plogger.info(f"The optimizer:\n{optimizer}")
-    plogger.info(f"The loss function :\n{loss_fn}")
+with open("/home/ninak/data/protein_data.pkl", "rb") as f:
+    prot_data = pickle.load(f)
+protein_dict = prot_data["protein_dict"]      # {protein_id to AA‐string}
+logger.info(f"Loaded {len(protein_dict)} proteins")
 
-    data_dir = "/blob/dda/PXD028806/"
-    pickle_file_path = data_dir + "training_data/"
-    training_data = glob.glob(pickle_file_path + "*.pkl")
-    plogger.info(f"The training data: {data_dir}")
-    plogger.info(f"training data files: {training_data}")
+training_files = glob.glob("/blob/dda/PXD028806/training_data/*.pkl")
+logger.info(f"Found {len(training_files)} training files")
 
-    training_step = 0
-    max_training_step = 1e6  # This could be 1e9 or something like this
-    batch_size = 8
+step = 0
+while step < MAX_STEPS:
+    logger.info("New epoch has started!")
+    for fn in training_files:
+        df = pickle.load(open(fn,"rb"))
+        df = df.sample(frac=1).reset_index(drop=True)
+        file_loss = 0.0
 
-    # Read the proteome
-    with open('/home/data/Fasta/uniprot-proteome_UP000005640+reviewed_yes.pkl', 'rb') as f:  # 'rb' = read binary
-        data = pickle.load(f)
-        proteome_seq = data['long_sequence']
-        proteome_pos = data['position_dict']
-    plogger.info(f"Proteome length: {len(proteome_seq)}")
-    plogger.info(f"Number of proteins: {len(proteome_pos)}")
+        for _, row in df.iterrows():
+            peaks_mz = row.mz_values
+            peptide = row.sequence
+            prot_ids = row.protein_ids  # {pid:{start,end}, ...}
 
-    with open('/home/ninak/protein_seq_dict.pkl', 'rb') as f:  # 'rb' = read binary
-        protein_id_seq_dict = pickle.load(f)
-    plogger.info(f"Loaded dictionary with {len(protein_id_seq_dict)} entries.")
+            # train on the *first* mapping
+            pid, pos = next(iter(prot_ids.items()))
+            if pid not in protein_dict:
+                continue
 
-    while True:
-        plogger.info(f"New epoch has started!")
-        # Iterate over the training data files
-        for training_data_file in training_data:
+            full_seq = protein_dict[pid]
+            #print('Sequence len', len(full_seq))
+            pep_len  = len(peptide)
+            # center index of peptide in protein if we want to predict center
+            #center   = pos["start"] + pep_len//2
+            peptide_start = pos["start"]
+            # forward
+            logits = model(peaks_mz, full_seq).squeeze(0)     # to shape (len(full_seq),)
+            target = torch.tensor([peptide_start], device=device)
+
+            loss = loss_fn(logits, target)
+            file_loss += loss.item()
+
+            loss.backward()
+            step += 1
+            if step % BATCH_SIZE == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+            if step >= MAX_STEPS:
+                break
             
-            with open(training_data_file, "rb") as f:
-                data = pickle.load(f)
-            plogger.info(f"Reading training data file:  {training_data_file}, Data read: {len(data)}")
-            file_loss = 0.0
+            writer.add_scalar("Loss/train", loss.item(), step)
 
-            # random.shuffle(data)
-            data.sample(frac=1).reset_index(drop=True)  
-            # Iterate over the training data
-            for index, data_item in data.iterrows():
+        logger.info(f"{os.path.basename(fn)}: mean loss = {file_loss/len(df):.4f}")
+        if step >= MAX_STEPS:
+            break
 
-                peaks_mz = data_item.mz_values
-                sequence = data_item.sequence
-                sequence_ids = data_item.protein_ids
-                #targets = []
-                for prot_id, pos_dict in sequence_ids.items():
-                    if prot_id in proteome_pos:
-                        protein_position = proteome_pos[prot_id]
-                        peptide_positions = list(range((protein_position+sequence_ids[prot_id]['start'])// kernel_stride, (protein_position+sequence_ids[prot_id]['end'])//kernel_stride))
-                        # print("the position:", proteome_pos[prot_id])
-                        # print("peptide id start:", sequence_ids[prot_id]['start'])
-                        # print("peptide id start:", sequence_ids[prot_id]['end'])
-                        # print("peptide_position:",peptide_position )
-                        targets += peptide_positions
-                # print(targets)
-                if len(targets) == 0:
-                    continue
+    if step >= MAX_STEPS:
+        break
 
-                # Forward pass                
-                output_distribution = transformer_model(peaks_mz, proteome_seq).squeeze(0)
-                # plogger.info(f"Model output distribution: {output_distribution}")
-            
-                # Loss function
-                loss = loss_fn(output_distribution, targets)  # Targets is a list of multiple targets, its like a multi-label classification
-
-                loss_to_report = loss.detach().data.cpu().numpy()
-                file_loss += loss_to_report
-
-                training_step += 1
-
-                if np.isnan(loss_to_report):
-                    plogger.info(f"loss: {loss_to_report}")
-                    sys.exit(f"Loss function is nan - {loss_to_report}!")
-
-                tensorboard_writer.add_scalar("Loss/train", loss_to_report, training_step)
-                loss.backward()
-                if training_step % batch_size == 0: 
-                    # print(transformer_model.decoder_embedding.embedding_layer.weight.grad.shape)
-                    # print(transformer_model.decoder_embedding.embedding_layer.weight.grad)
-                    # print(transformer_model.decoder_embedding.embedding_layer.weight)
-                    optimizer.step()
-                    optimizer.zero_grad()            
-                    # print(transformer_model.decoder_embedding.embedding_layer.weight)
-                    # plogger.info(f"Loss on last batch: {batch_loss/batch_size}")
-                    batch_loss = 0.0
-                if training_step > max_training_step:
-                    plogger.info("Max training step reached. Terminating normally. Bye.")
-                    exit(1)
-            plogger.info(f"Mean loss on the file:  {file_loss/len(data)}")
-            
-                
-plogger.info("Done. Bye.")
+logger.info("Training complete!")
+writer.close()
