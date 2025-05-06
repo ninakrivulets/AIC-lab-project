@@ -130,7 +130,7 @@ class PeakEncodingWithDistances(nn.Module):
 
 
 class AAEmbedding(nn.Module):
-    def __init__(self, device, embedding_dim=64, window_size = 2000000000, kernel_stride=7):
+    def __init__(self, device, embedding_dim=64, kernel_stride=7):
         super(AAEmbedding, self).__init__()
         self.embedding_dim = embedding_dim
         self.device = device
@@ -144,34 +144,17 @@ class AAEmbedding(nn.Module):
         # an embedding layer
         self.embedding_layer = nn.Embedding(num_embeddings=len(self.amino_acids), embedding_dim=self.embedding_dim).to(device)
         
-        #self.proteome_kernel = nn.Conv1d(in_channels=self.embedding_dim, out_channels=self.embedding_dim, kernel_size=kernel_stride*2+1, padding=kernel_stride, stride=kernel_stride).to(device)
+        self.proteome_kernel = nn.Conv1d(in_channels=self.embedding_dim, out_channels=self.embedding_dim, kernel_size=kernel_stride*2+1, padding=kernel_stride, stride=kernel_stride).to(device)
 
     def forward(self, sequence):
-        sequence = remove_brackets(sequence)
-        # Creating sliding windows
-        if len(sequence) < self.window_size:
-            chunks = [sequence]  # Use the whole sequence as one chunk
-        else:
-            chunks = [sequence[i:i+self.window_size]
-                    for i in range(0, len(sequence) - self.window_size + 1, self.stride)]
-
-        all_embeddings = []
-        for chunk in chunks:
-            try:
-                indices = torch.tensor(
-                    [self.aa_to_idx[aa] for aa in chunk],
-                    device=self.device
-                )
-            except KeyError as e:
-                raise ValueError(f"Invalid amino acid '{e.args[0]}' in input sequence.")
-
-            embedded = self.embedding_layer(indices).unsqueeze(0)  # shape: (1, window_size, embedding_dim)
-            all_embeddings.append(embedded)
-
-        if not all_embeddings:
-            raise ValueError(f"No valid embedding windows created from sequence: {sequence}")
-
-        return torch.stack(all_embeddings)
+        # Convert sequence to indices
+        print('SEQ LEN', len(sequence))
+        sequence_indices = torch.tensor([self.aa_to_idx[aa] for aa in sequence], device=self.device)
+        # Pass the indices through the embedding layer
+        embedded_sequence = self.embedding_layer(sequence_indices).unsqueeze(0).transpose(1,2)
+        # print(embedded_sequence.shape)
+        embedded_sequence = self.proteome_kernel(embedded_sequence).transpose(1,2)
+        return embedded_sequence # Adding batch dimension
     
 
 class MultiHeadAttention(nn.Module):
@@ -206,7 +189,7 @@ class MultiHeadAttention(nn.Module):
          #0- axis (batch_size) stays,
          #2-axis (seq_length) becomes 1,
          #1-axis (num_heads) becomes 2,
-         # 3 axis (depth) stays.
+         # 3-я axis (depth) stays.
          # we get tensor with shape (batch_size, seq_len_q, num_heads, depth).
         return self.dense(attention_output)
 
@@ -291,10 +274,14 @@ class MultiTargetLoss(torch.nn.Module):
         super().__init__()
 
     def forward(self, prediction, targets):
-        
-        target_lse = torch.logsumexp(prediction[targets], dim=0)
+        print("PREDS", prediction)
+        print("TARGETS", targets)
+        targets = torch.Tensor(targets)
+        #target_lse = torch.logsumexp(prediction[targets], dim=0)
+        target_lse = torch.logsumexp(targets, dim=0)
         lse = torch.logsumexp(prediction, dim=0)
-
+        print('LSE', lse)
+        print(lse - target_lse)
         return lse - target_lse
         
 def get_logger(exp_id, log_path):
