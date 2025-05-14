@@ -18,7 +18,7 @@ import logging
 # from torch.utils.tensorboard import SummaryWriter
 
 class PeakEncoding(nn.Module):
-    def __init__(self, device, d_model=64):
+    def __init__(self, d_model, device):
         super(PeakEncoding, self).__init__()
         self.d_model = d_model
         self.device = device
@@ -150,9 +150,9 @@ class AAEmbedding(nn.Module):
         # Convert sequence to indices
         sequence_indices = torch.tensor([self.aa_to_idx[aa] for aa in sequence], device=self.device)
         # Pass the indices through the embedding layer
-        embedded_sequence = self.embedding_layer(sequence_indices).unsqueeze(0).transpose(1,2)
+        embedded_sequence = self.embedding_layer(sequence_indices).unsqueeze(0)#.transpose(1,2)
         # print(embedded_sequence.shape)
-        embedded_sequence = self.proteome_kernel(embedded_sequence).transpose(1,2)
+        # embedded_sequence = self.proteome_kernel(embedded_sequence).transpose(1,2)
         return embedded_sequence # Adding batch dimension
     
 
@@ -240,7 +240,8 @@ class Decoder(nn.Module):
 class Transformer(nn.Module):
     def __init__(self, device, d_model=64, num_heads=8, num_layers=6, kernel_stride=7):
         super(Transformer, self).__init__()
-        self.encoder_positional_encoding = PeakEncodingWithDistances(d_model, device)
+        # self.encoder_positional_encoding = PeakEncodingWithDistances(d_model, device)
+        self.encoder_positional_encoding = PeakEncoding(d_model, device)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads).to(device)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers).to(device)
         
@@ -274,7 +275,8 @@ class MultiTargetLoss(torch.nn.Module):
 
     def forward(self, prediction, targets):
         
-        target_lse = torch.logsumexp(prediction[targets], dim=0)
+        target_lse = torch.mean(prediction[targets], dim=0)
+        # coeff = torch.tensor(len(targets), device=target_lse.device)
         lse = torch.logsumexp(prediction, dim=0)
 
         return lse - target_lse

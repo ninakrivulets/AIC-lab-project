@@ -12,8 +12,8 @@ from model_with_pos_encoding import (
 
 GPU_ID = 0
 BATCH_SIZE = 8
-MAX_STEPS = int(1e6)
-LEARNING_RATE = 1e-3
+MAX_STEPS = int(2e6)
+LEARNING_RATE = 2e-3
 
 device = torch.device(f"cuda:{GPU_ID}" if torch.cuda.is_available() else "cpu")
 exp_id = generate_uuid()
@@ -27,9 +27,9 @@ logger.info(f"Using device {device}")
 writer = SummaryWriter(log_dir=exp_dir)
 logger.info("TensorBoard writer initialized.")
 
-num_heads = 4
+num_heads = 8
 num_layers = 6
-model_dim = 48
+model_dim = 128
 poteome_kernel_stride = 1 # Used in proteome embedding to reduce the proteom length.
 logger.info(f"Model num head: {num_heads}")
 logger.info(f"Model num layer: {num_layers}")
@@ -44,6 +44,7 @@ model = Transformer(device=device,
                         num_layers=num_layers,
                         d_model=model_dim, kernel_stride=poteome_kernel_stride).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+# loss_fn = nn.CrossEntropyLoss().to(device) # 
 loss_fn = MultiTargetLoss().to(device)
 
 logger.info(f"Model:\n{model}")
@@ -60,7 +61,7 @@ logger.info(f"Found {len(training_files)} training files")
 
 step = 0
 while step < MAX_STEPS:
-    logger.info("New epoch has started! Current steps: {step} out of max step: {MAX_STEPS}")
+    logger.info(f"New epoch has started! Current steps: {step} out of max step: {MAX_STEPS}")
     for fn in training_files:
         df = pickle.load(open(fn,"rb"))
         df = df.sample(frac=1).reset_index(drop=True)
@@ -71,15 +72,21 @@ while step < MAX_STEPS:
             peptide = row.sequence
             prot_ids = row.protein_ids  # {pid:{start,end}, ...}
 
+            # print(peaks_mz)
+            # print(peptide)
+            # print(prot_ids)
+
             # train on the *first* mapping
             pid, pos = next(iter(prot_ids.items()))
             if pid not in protein_dict:
                 continue
 
+            # print(pos["start"])
+            # print(protein_dict[pid])
             full_seq = protein_dict[pid]+"ACDKLNACDKLNACDKLNACDKLNACDKLNACDKLN"
             # print('Sequence len', len(full_seq))
             # logger.info(f"protein:  {full_seq}")
-            pep_len  = len(peptide)
+            # pep_len  = len(peptide)
             # center index of peptide in protein if we want to predict center
             #center   = pos["start"] + pep_len//2
             # peptide_start = pos["start"]//poteome_kernel_stride
@@ -90,8 +97,12 @@ while step < MAX_STEPS:
             # forward
             logits = model(peaks_mz, full_seq).squeeze(0)     # to shape (len(full_seq),)
             # target = torch.tensor(peptide_positions, device=device)
-
             loss = loss_fn(logits, peptide_positions)
+
+            # target = torch.tensor((pos["start"]+pos["end"])//2, device=device, dtype=torch.long).unsqueeze(dim=0)
+            # loss = loss_fn(logits.unsqueeze(0), target)
+
+
             file_loss += loss.item()
             # logger.info(f"Model output distribution: {logits}, loss: {loss.item()}")
             # logger.info(f"Model output distribution: , loss: {loss.item()}")
