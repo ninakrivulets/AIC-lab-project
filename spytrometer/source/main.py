@@ -13,7 +13,7 @@ from model_with_pos_encoding import (
 GPU_ID = 0
 BATCH_SIZE = 8
 MAX_STEPS = int(2e6)
-LEARNING_RATE = 2e-3
+LEARNING_RATE = 1e-3
 
 device = torch.device(f"cuda:{GPU_ID}" if torch.cuda.is_available() else "cpu")
 exp_id = generate_uuid()
