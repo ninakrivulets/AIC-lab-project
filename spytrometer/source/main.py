@@ -1,6 +1,7 @@
 import os, glob, pickle, sys, logging, argparse
 import torch, torch.nn as nn
 import numpy as np
+import pandas as pd
 from torch.utils.tensorboard import SummaryWriter
 
 from model_with_pos_encoding import (
@@ -8,12 +9,39 @@ from model_with_pos_encoding import (
     generate_uuid,
     get_logger,
     MultiTargetLoss,
+    compute_b_ions_modified,
 )
 
 GPU_ID = 0
 BATCH_SIZE = 8
 MAX_STEPS = int(10e7)
 LEARNING_RATE = 1e-3
+
+AA_MASS = {
+    "A": 71.03711,
+    "R": 156.10111,
+    "N": 114.04293,
+    "D": 115.02694,
+    "C": 103.00919,
+    "E": 129.04259,
+    "Q": 128.05858,
+    "G": 57.02146,
+    "H": 137.05891,
+    "I": 113.08406,
+    "L": 113.08406,
+    "K": 128.09496,
+    "M": 131.04049,
+    "F": 147.06841,
+    "P": 97.05276,
+    "S": 87.03203,
+    "T": 101.04768,
+    "W": 186.07931,
+    "Y": 163.06333,
+    "V": 99.06841
+}
+
+PROTON = 1.007276466812
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--resume_from', type=str, default=None, help='Resume training from experiment ID')
@@ -89,6 +117,10 @@ protein_dict = prot_data["protein_dict"]      # {protein_id to AA‐string}
 logger.info(f"Loaded {len(protein_dict)} proteins")
 
 training_files = glob.glob("/blob/dda/PXD028806/training_data/*.pkl")
+#training_files_path = '/home/ninak/checkpoints/_kU4hfpfT_iWbo9ZIW3m1A/PXD028806_tailor_177_0_RPEIVVATPGR.pkl'
+#with open(training_files_path, 'rb') as file:
+    # Load the data (deserialize)
+    #training_files = pickle.load(file)
 logger.info(f"Found {len(training_files)} training files")
 
 while step < MAX_STEPS:
@@ -99,30 +131,49 @@ while step < MAX_STEPS:
         file_loss = 0.0
         logger.info(f"Reading training data file: {fn}, Data read: {len(df)}")
         for _, row in df.iterrows():
-
+            peptide = row.sequence
             peaks_mz = []
             peak_intensities = []
-            peaks_mz.append(np.float64(1.007825035)) # mass of H
-            peak_intensities.append(100) #intensity 100
-            peaks_mz.extend(row.mz_values)
-            intensities = row.intensity
-            peak_intensities.extend(intensities)
-            spectrum_neutral_mass = row.spectrum_neutral_mass
-            spectral_min_mz = [(spectrum_neutral_mass - i) for i in row.mz_values]
-            peaks_mz.extend(spectral_min_mz)
-            #peak_intensities.extend([100]*150)
-            peak_intensities.extend(intensities)
-            peaks_mz.append(np.float64(1.007825035 + 15.99491463))   # mass of OH
-            peaks_mz.append(np.float64(spectrum_neutral_mass))
-            peak_intensities.append(100)
+            peaks_mz.append(np.float64(1.007825035))
+            peaks_mz.extend(compute_b_ions_modified(peptide))
+            #print("PEAKS", peaks_mz)
+            peak_intensities = [100]*len(peaks_mz)
+           
+            #print('1', len(peaks_mz))
+            #peak_intensities.append(100) #intensity 100
+            #peaks_mz.extend(row.mz_values)
+            #print('2', len(peaks_mz))
+            #intensities = row.intensity
+            #peak_intensities.extend(intensities)
+            #spectrum_neutral_mass = row.spectrum_neutral_mass
+            #spectral_min_mz = [(spectrum_neutral_mass - i) for i in row.mz_values]
+            #peaks_mz.extend(spectral_min_mz)
             
-            peptide = row.sequence
+            #peak_intensities.extend([100]*150)
+            #peak_intensities.extend(intensities)
+            #peaks_mz.append(np.float64(1.007825035 + 15.99491463))   # mass of OH
+            #peaks_mz.append(np.float64(spectrum_neutral_mass))
+            #peak_intensities.append(100)
+            #peak_intensities.append(100)
+
+            #peaks_mz.extend(row.mz_values)
+            #print('2', len(peaks_mz))
+            #intensities = row.intensity
+            #peak_intensities.extend(intensities)
+            #peptide = row.sequence
+            #peaks_mz = []
+            #peak_intensities = []
+            #peaks_mz.append(np.float64(1.007825035))
+            #peaks_mz.extend(compute_b_ions_modified(peptide)[:300])
+            #peaks_mz.extend(spectral_min_mz)
+            #print("PEAKS", peaks_mz)
             prot_ids = row.protein_ids  # {pid:{start,end}, ...}
             #spectrum_neutral_mass = row.spectrum_neutral_mass
             #spectral_min_mz = [(spectrum_neutral_mass - i) for i in row.mz_values]
             #peaks_mz.extend(spectral_min_mz)
             #peaks_mz.append(np.float64(1.007825035 + 15.99491463)) # mass of OH
-
+            #print("PEAKS_MZ")
+            #print(peaks_mz[:70])
             # print(len(peaks_mz)) is 302
             # train on the *first* mapping
             pid, pos = next(iter(prot_ids.items()))
@@ -131,7 +182,9 @@ while step < MAX_STEPS:
 
             # print(pos["start"])
             # print(protein_dict[pid])
+
             full_seq = protein_dict[pid]+"ACDKLNACDKLNACDKLNACDKLNACDKLNACDKLN"
+            #full_seq = "ACDKLNARSKNW"
             # print('Sequence len', len(full_seq))
             # logger.info(f"protein:  {full_seq}")
             # pep_len  = len(peptide)
@@ -143,7 +196,8 @@ while step < MAX_STEPS:
               continue
             # logger.info(f"peptide_positions: {peptide_positions}, protein length {len(full_seq)}")
             # forward
-            logits = model(peaks_mz, full_seq)  # to shape (len(full_seq),)
+            #print(full_seq)
+            logits = model(peaks_mz, full_seq)#, peak_intensities, full_seq)  # to shape (len(full_seq),)
             logits = logits.view(1, -1)
 
             center = (pos['start'] + pos['end'])//2
@@ -151,11 +205,17 @@ while step < MAX_STEPS:
             target = torch.tensor([center_index], device=device)
             # target = torch.tensor(peptide_positions, device=device)
             #loss = loss_fn(logits, peptide_positions)
+            if center_index >= logits.shape[1]:
+                print("ERROR:", center_index, logits.shape[1], full_seq, len(full_seq))
+                print("start/end:", pos['start'], pos['end'])
+                print("stride:", proteome_kernel_stride)
+                raise ValueError("Target index out of range")
+
             loss = loss_fn(logits, target)
             # target = torch.tensor((pos["start"]+pos["end"])//2, device=device, dtype=torch.long).unsqueeze(dim=0)
             # loss = loss_fn(logits.unsqueeze(0), target)
 
-
+            
             file_loss += loss.item()
             # logger.info(f"Model output distribution: {logits}, loss: {loss.item()}")
             # logger.info(f"Model output distribution: , loss: {loss.item()}")

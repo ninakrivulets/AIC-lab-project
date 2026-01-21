@@ -13,9 +13,84 @@ import string
 import uuid
 import base64
 import logging
-# import pickle
-# from utils import get_logger, code_backup
-# from torch.utils.tensorboard import SummaryWriter
+
+from torch_geometric.data import Data
+from torch_geometric.nn import GCNConv
+
+
+AA_MASS = {
+    "A": 71.03711,
+    "R": 156.10111,
+    "N": 114.04293,
+    "D": 115.02694,
+    "C": 103.00919,
+    "E": 129.04259,
+    "Q": 128.05858,
+    "G": 57.02146,
+    "H": 137.05891,
+    "I": 113.08406,
+    "L": 113.08406,
+    "K": 128.09496,
+    "M": 131.04049,
+    "F": 147.06841,
+    "P": 97.05276,
+    "S": 87.03203,
+    "T": 101.04768,
+    "W": 186.07931,
+    "Y": 163.06333,
+    "V": 99.06841
+}
+
+PROTON = 1.007276466812
+
+import re
+
+def parse_modified_sequence(sequence: str):
+    """Parse peptide sequence with inline PTMs like M[15.99]
+    """
+    pattern = re.compile(r"([A-Z])(?:\[([+-]?\d*\.?\d+)\])?")
+    residues = []
+
+    for aa, mod in pattern.findall(sequence):
+        if aa not in AA_MASS:
+            raise ValueError(f"Unknown amino acid: {aa}")
+
+        mass = AA_MASS[aa]
+        if mod:
+            mass += float(mod)
+
+        residues.append(mass)
+
+    return residues
+
+def compute_b_ions_modified(sequence: str):
+   
+    residue_masses = parse_modified_sequence(sequence)
+
+    b_ions = []
+    cumulative_mass = PROTON
+
+    for i, mass in enumerate(residue_masses, start=1):
+        cumulative_mass += mass
+        b_ions.append((cumulative_mass))
+
+    return b_ions
+
+
+def compute_b_ions(sequence: str):
+    
+    b_ions = []
+    cumulative_mass = 0.0
+
+    for i, aa in enumerate(sequence, start=1):
+        if aa not in AA_MASS:
+            raise ValueError(f"Unknown amino acid: {aa} in {sequence}")
+
+        cumulative_mass += AA_MASS[aa]
+        b_mass = cumulative_mass + PROTON
+        b_ions.append((b_mass))
+
+    return b_ions
 
 class PeakEncoding(nn.Module):
     def __init__(self, d_model, device):
@@ -70,6 +145,8 @@ class PeakEncodingWithDistances(nn.Module):
         matrix_1 = array.unsqueeze(0).expand(length, -1)  # First matrix with the array in the rows
         matrix_2 = array.unsqueeze(1).expand(-1, length)  # Matrix with the array in the columns
         diff = torch.abs(matrix_1 - matrix_2)  # Distance matrix
+        print(diff)
+        print(array)
         return diff
 
     def tri_cube(self, array):
@@ -128,8 +205,65 @@ class PeakEncodingWithDistances(nn.Module):
         print(encoding.shape)
         return encoding
 
+import torch
+import torch.nn as nn
+import math
+from torch_geometric.data import Data
+from torch_geometric.nn import GCNConv   # can swap for GAT, GraphSAGE, etc.
 
-class PeakEncodingWithProteinSeq(nn.Module):
+class PeakEncodingWithDistances_Graph(nn.Module):
+    def __init__(self, d_model=64, device='cuda'):
+        super().__init__()
+        self.d_model = d_model
+        self.device = device
+        assert d_model % 2 == 0
+
+        self.aa_mass = {
+            "G": 57.02146, "A": 71.03711, "S": 87.03203, "P": 97.05276, "V": 99.06841,
+            "T": 101.04768, "C": 103.00919, "L": 113.08406, "I": 113.08406, "N": 114.04293,
+            "D": 115.02694, "Q": 128.05858, "K": 128.09496, "E": 129.04259, "M": 131.04049,
+            "H": 137.05891, "F": 147.06841, "U": 150.95364, "R": 156.10111, "Y": 163.06333,
+            "W": 186.07931, "1": 147.035399, "2": 166.998359435, "3": 181.014009505,
+            "4": 243.029659575, "5": 170.10552805, "6": 170.11676105, "7": 142.11061305
+        }
+        self.aa_masses_tensor = torch.tensor(list(self.aa_mass.values()), device=self.device)
+
+    def dist_matrix(self, arr):
+        arr = arr.unsqueeze(0)
+        diff = torch.abs(arr - arr.T)
+        return diff
+
+    def tri_cube(self, array):
+        array = torch.abs(array / 0.05)
+        return torch.where(array <= 1, (1 - array**3)**3, torch.tensor(0.0, device=array.device))
+
+    def forward(self, mz_values):
+        mz_values = torch.tensor(mz_values, device=self.device)
+        diff = self.dist_matrix(mz_values)  # (N, N)
+
+        mass_diff_matrices = torch.abs(diff.unsqueeze(0) - self.aa_masses_tensor[:, None, None])
+        match_matrices = self.tri_cube(mass_diff_matrices)
+
+        # OR: sum over amino acids to get final adjacency weights
+        adjacency = torch.sum(match_matrices, dim=0)  # (N, N)
+
+        # make diagonal = 1 (self loops)
+        adjacency.fill_diagonal_(1.0)
+
+        # build positional encodings
+        N = mz_values.shape[0]
+        div_term = torch.exp(torch.arange(0, self.d_model, 2, device=self.device) * (-math.log(10000.0)/self.d_model))
+        div_term = div_term.unsqueeze(0)  # (1, d_model/2)
+
+        mz_expand = mz_values.unsqueeze(1)  # (N,1)
+        pe_sin = torch.sin(mz_expand * div_term)
+        pe_cos = torch.cos(mz_expand * div_term)
+        pe = torch.cat((pe_sin, pe_cos), dim=1)  # (N, d_model)
+
+        return pe, adjacency
+
+
+class PeakEncodingWithProteinSeqWorks(nn.Module):
     def __init__(self, d_model=128, device='cuda', dropout=0.1):
         """
         vocab_size : размер словаря (например 21 для аминокислот)
@@ -189,6 +323,75 @@ class PeakEncodingWithProteinSeq(nn.Module):
         
         return self.dropout(encoding)
 
+
+class PeakEncodingWithProteinSeq(nn.Module):
+    def __init__(self, d_model=64, device='cuda', dropout=0.1):
+        super().__init__()
+        self.d_model = d_model
+        self.device = device
+
+        # Amino acid masses
+        self.aa_mass = {
+            "G": 57.02146, "A": 71.03711, "S": 87.03203, "P": 97.05276, "V": 99.06841,
+            "T": 101.04768, "C": 103.00919, "L": 113.08406, "I": 113.08406, "N": 114.04293,
+            "D": 115.02694, "Q": 128.05858, "K": 128.09496, "E": 129.04259, "M": 131.04049,
+            "H": 137.05891, "F": 147.06841, "U": 150.95364, "R": 156.10111, "Y": 163.06333,
+            "W": 186.07931, "1": 147.035399, "2": 166.998359435, "3": 181.014009505,
+            "4": 243.029659575, "5": 170.10552805, "6": 170.11676105, "7": 142.11061305
+        }
+
+        self.amino_acids = list(self.aa_mass.keys())
+        self.aa_to_idx = {aa: idx for idx, aa in enumerate(self.amino_acids)}
+
+        # Embedding for amino acids
+        self.embedding_layer = nn.Embedding(len(self.aa_mass), d_model)
+
+        # Linear projection for m/z
+        self.mz_proj = nn.Linear(1, d_model)
+
+        # Positional encoder for peak intensity order
+        self.rank_positional_encoder = nn.Linear(1, d_model)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, mz_values, intensities, protein_seq):
+        """
+        mz_values: (N_peaks,) tensor of m/z values
+        intensities: (N_peaks,) tensor of intensities
+        protein_seq: string of amino acids (e.g., "MPEPTIDE")
+        Returns:
+            encoding: (N_peaks, 2 * d_model)
+        """
+        #print('INT', len(intensities))
+        # Protein sequence encoding
+        sequence_indices = torch.tensor(
+            [self.aa_to_idx.get(aa, 0) for aa in protein_seq], device=self.device
+        )
+        aa_emb = self.embedding_layer(sequence_indices) # (seq_len, d_model)
+        protein_context = aa_emb.mean(dim=0) # (d_model,)
+
+        # m/z encoding
+        mz_values = torch.tensor(mz_values, dtype=torch.float32, device=self.device).unsqueeze(-1)
+        mz_emb = self.mz_proj(mz_values) # (N_peaks, d_model)
+
+        # Combine with protein context
+        protein_context_expanded = protein_context.unsqueeze(0).expand(mz_emb.size(0), -1)
+        base_encoding = mz_emb + protein_context_expanded # (N_peaks, d_model)
+
+        #Intensity positional encoding
+        intensities = torch.tensor(intensities, dtype=torch.float32, device=self.device)
+        sorted_indices = torch.argsort(intensities, descending=False)
+        ranks = torch.zeros_like(sorted_indices, dtype=torch.float32)
+        ranks[sorted_indices] = torch.arange(len(sorted_indices), dtype=torch.float32, device=self.device)
+
+        # Normalize rank to [0, 1]
+        ranks = ranks / (len(ranks) - 1 + 1e-8)
+        rank_emb = self.rank_positional_encoder(ranks.unsqueeze(-1)) # (N_peaks, d_model)
+        #print('RANK', rank_emb.shape)
+        #print('BASE', base_encoding.shape)
+        # Concatenate both encodings 
+        final_encoding = torch.cat([base_encoding, rank_emb], dim=-1) # (N_peaks, 2*d_model)
+        return self.dropout(final_encoding)
 
 
 class PeakEncodingWithWater_try(nn.Module):
@@ -435,10 +638,10 @@ class Transformer(nn.Module):
     def __init__(self, device, d_model=64, num_heads=8, num_layers=6, kernel_stride=7):
         super(Transformer, self).__init__()
         
-        self.encoder_positional_encoding = PeakEncodingWithProteinSeq(d_model, device)
+        #self.encoder_positional_encoding =  PeakEncodingWithProteinSeq(64, device)# PeakEncodingWithProteinSeq(d_model, device)
         #self.encoder_positional_encoding = PeakEncodingWithDistances(d_model, device)
         #self.encoder_positional_encoding = PeakEncodingWithWater(d_model, device)
-        #self.encoder_positional_encoding = PeakEncoding(d_model, device)
+        self.encoder_positional_encoding = PeakEncoding(d_model, device)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads).to(device)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers).to(device)
         
@@ -448,10 +651,10 @@ class Transformer(nn.Module):
         self.final_layer = nn.Linear(d_model, 1).to(device)  # Output size is 1 for the center prediction
         self.device = device
 
-    def forward(self, encoder_input, decoder_input):
+    def forward(self, encoder_input, decoder_input):#, intensities, decoder_input):
         #print("Enc", list(encoder_input))
         #print("Dec", len(decoder_input))
-        encoder_input = self.encoder_positional_encoding(encoder_input, decoder_input)#, decoder_input)
+        encoder_input = self.encoder_positional_encoding(encoder_input)# intensities, decoder_input)#, decoder_input)
         enc_output = self.encoder(encoder_input)
 
         decoder_input_embedded = self.decoder_embedding(decoder_input)
