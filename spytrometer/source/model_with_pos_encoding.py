@@ -14,8 +14,8 @@ import uuid
 import base64
 import logging
 
-from torch_geometric.data import Data
-from torch_geometric.nn import GCNConv
+# from torch_geometric.data import Data
+# from torch_geometric.nn import GCNConv
 
 
 AA_MASS = {
@@ -42,6 +42,7 @@ AA_MASS = {
 }
 
 PROTON = 1.007276466812
+Nterm = 1.007825035
 
 import re
 
@@ -68,7 +69,7 @@ def compute_b_ions_modified(sequence: str):
     residue_masses = parse_modified_sequence(sequence)
 
     b_ions = []
-    cumulative_mass = PROTON
+    cumulative_mass = Nterm
 
     for i, mass in enumerate(residue_masses, start=1):
         cumulative_mass += mass
@@ -77,20 +78,20 @@ def compute_b_ions_modified(sequence: str):
     return b_ions
 
 
-def compute_b_ions(sequence: str):
+# def compute_b_ions(sequence: str):
     
-    b_ions = []
-    cumulative_mass = 0.0
+#     b_ions = []
+#     cumulative_mass = 0.0
 
-    for i, aa in enumerate(sequence, start=1):
-        if aa not in AA_MASS:
-            raise ValueError(f"Unknown amino acid: {aa} in {sequence}")
+#     for i, aa in enumerate(sequence, start=1):
+#         if aa not in AA_MASS:
+#             raise ValueError(f"Unknown amino acid: {aa} in {sequence}")
 
-        cumulative_mass += AA_MASS[aa]
-        b_mass = cumulative_mass + PROTON
-        b_ions.append((b_mass))
+#         cumulative_mass += AA_MASS[aa]
+#         b_mass = cumulative_mass + PROTON
+#         b_ions.append((b_mass))
 
-    return b_ions
+#     return b_ions
 
 class PeakEncoding(nn.Module):
     def __init__(self, d_model, device):
@@ -115,6 +116,75 @@ class PeakEncoding(nn.Module):
         pe = torch.cat((pe_sin, pe_cos), dim=1)  # shape: (n_peaks, d_model)
 
         return pe
+
+ #Spectrum encoding with binary vector indicating peak distances. if a distance between two peaks is equal to a given amino acid mass
+class SpectrumEncoding(nn.Module): 
+    def __init__(self, d_model=64, device='cuda'):
+        super(SpectrumEncoding, self).__init__()
+        self.d_model = d_model
+        self.device = device
+        self.masses = torch.tensor(list(AA_MASS.values()), dtype=torch.float32, device=device)
+        self.AA_num = self.masses.shape[0] # Number of Amino Acids
+
+        scale = torch.tensor(0.001, dtype=torch.float32, device=device)
+        base =  torch.tensor(5000.0, dtype=torch.float32, device=device)
+
+        # The spectrum peak embedding will have a dimension  = peak_pos_embedding + AA_num = d_model
+        peak_pos_embeddig_dim = d_model-self.AA_num    # d_model should be larger than AA_num, 
+
+        exp_term = torch.arange(1, peak_pos_embeddig_dim+1, 2, dtype=torch.float32, device=self.device)*2/peak_pos_embeddig_dim
+        self.div_term =1.0/(scale * torch.pow(base, exp_term))      
+
+    def forward(self, mz_peaks): 
+        #mz_peaks = torch.tensor(peaks_mz, dtype=torch.float32, device=device) of shape (150,), one dimensional, 
+
+        # Get the peak embeddings, with sin-cos
+        outer = torch.outer(mz_peaks, self.div_term) # shape: (n_peaks, (d_model- AA_num)/2)
+        pe_sin = torch.sin(outer)  # shape: (n_peaks, (d_model- AA_num)/2)
+        pe_cos = torch.cos(outer)  # shape: (n_peaks, (d_model- AA_num)/2)
+        
+        # Concatenate sine and cosine encodings
+        spectrum_tensor = torch.cat((pe_sin, pe_cos), dim=1)  # shape: (n_peaks, d_model-AA_num)
+
+        # Get peak pairs whose distances is equal to the mass of one of the amino acids        
+        #mz_peaks = torch.tensor(peaks_mz, dtype=torch.float32, device=device) of shape (150,), one dimensional, 
+
+        # diff_AA_idx[i,j,k] indicates that if the peak_i and peak_j has a difference of the mass of amino acid k
+        diff_AA_idx = self.peak_distances(mz_peaks)  # shape [peak_num, peak_num, AA_num], 
+
+        spectrum_tensor_with_aa_dist_idx = []        
+        diff_AA_cnt = diff_AA_idx.sum(dim=2)   # Keep peak pairs whose distance is equal to one of the amino acid masses; discard the others
+        peak_pair_idx = diff_AA_cnt.nonzero()
+        for pair in peak_pair_idx:
+            if (pair[0] < pair[1]):
+                spectrum_tensor_with_aa_dist_idx.append(torch.cat((spectrum_tensor[pair[0],:], diff_AA_idx[pair[0], pair[1], :])))
+
+        out = torch.stack(spectrum_tensor_with_aa_dist_idx)   # shape: (peaks, d_model), 2-D tensor
+        return out
+
+        # peak_dist_mx = self.peak_distances(mz_peaks)
+
+    def peak_distances(self, mz_peaks):
+        # mz_peaks = torch.tensor(peaks_mz, dtype=torch.float32, device=device) of shape (peak_num,), one dimensional, max peak num is around 150
+
+        peaks_num = mz_peaks.shape[0]     # Expecting an 1-D array of values. Shape: [peak_num]
+        peaks_vector = mz_peaks.unsqueeze(1)  # we make each value as a 1-D vector, shape: [peak_num, 1]
+                
+        diff = torch.cdist(peaks_vector, peaks_vector)   # shape: [peak_num, peak_num], 2-D tensor, [i,j] contains  | peak_i - peak_j |
+        diff_AA = diff.unsqueeze(2).repeat(1,1,self.AA_num)  # shape: [peak_num, peak_num, AA_num], 3-D tensor
+
+        #self.masses list of AA masses: shape [AA_num]
+        AA_mass = self.masses.unsqueeze(0).repeat(peaks_num, 1)  # shape [peak_num, AA_num]
+        AA_mass = AA_mass.unsqueeze(0).repeat(peaks_num, 1, 1)   # shape [peak_num, peak_num, AA_num]
+
+        diff_AA_mass = torch.abs(AA_mass - diff_AA)   # shape [peak_num, peak_num, AA_num]
+
+        # diff_AA_idx[i,j,k] indicates that if the peak_i and peak_j has a difference of the mass of amino acid k
+        diff_AA_idx = torch.where( diff_AA_mass < 0.02, 1.0, 0.0)   # shape [peak_num, peak_num, AA_num], 
+        
+        return diff_AA_idx
+    
+
 
 
 class PeakEncodingWithDistances(nn.Module):
@@ -208,8 +278,8 @@ class PeakEncodingWithDistances(nn.Module):
 import torch
 import torch.nn as nn
 import math
-from torch_geometric.data import Data
-from torch_geometric.nn import GCNConv   # can swap for GAT, GraphSAGE, etc.
+# from torch_geometric.data import Data
+# from torch_geometric.nn import GCNConv   # can swap for GAT, GraphSAGE, etc.
 
 class PeakEncodingWithDistances_Graph(nn.Module):
     def __init__(self, d_model=64, device='cuda'):
@@ -548,7 +618,7 @@ class AAEmbedding(nn.Module):
         sequence_indices = torch.tensor([self.aa_to_idx[aa] for aa in sequence], device=self.device)
         # Pass the indices through the embedding layer
         embedded_sequence = self.embedding_layer(sequence_indices).unsqueeze(0)#.transpose(1,2)
-        # print(embedded_sequence.shape)
+        # print("embedded_sequence.shape", embedded_sequence.shape)
         # embedded_sequence = self.proteome_kernel(embedded_sequence).transpose(1,2)
         return embedded_sequence # Adding batch dimension
     
@@ -590,7 +660,7 @@ class MultiHeadAttention(nn.Module):
         return self.dense(attention_output)
 
 class FeedForward(nn.Module):
-    def __init__(self, d_model, d_ff=128):
+    def __init__(self, d_model, d_ff=2048):
         super(FeedForward, self).__init__()
         self.linear1 = nn.Linear(d_model, d_ff)
         self.linear2 = nn.Linear(d_ff, d_model)
@@ -611,7 +681,7 @@ class DecoderLayer(nn.Module):
 
     def forward(self, x, enc_output):
         # attn1 = self.mha1(x, x, x)
-        # print(x.shape) # is [1, 24, 64]
+        # print(x.shape) # is [1, 24, 64], dim:64, seq_len: 24
         x = x.permute(0, 2, 1)  # Change shape from (batch, seq_len, d_model) to (batch, d_model, seq_len)
         # print(x.shape) # is ([1, 64, 24])
         conv_output = self.conv1d(x)
@@ -638,10 +708,6 @@ class Transformer(nn.Module):
     def __init__(self, device, d_model=64, num_heads=8, num_layers=6, kernel_stride=7):
         super(Transformer, self).__init__()
         
-        #self.encoder_positional_encoding =  PeakEncodingWithProteinSeq(64, device)# PeakEncodingWithProteinSeq(d_model, device)
-        #self.encoder_positional_encoding = PeakEncodingWithDistances(d_model, device)
-        #self.encoder_positional_encoding = PeakEncodingWithWater(d_model, device)
-        self.encoder_positional_encoding = PeakEncoding(d_model, device)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads).to(device)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers).to(device)
         
@@ -651,11 +717,11 @@ class Transformer(nn.Module):
         self.final_layer = nn.Linear(d_model, 1).to(device)  # Output size is 1 for the center prediction
         self.device = device
 
-    def forward(self, encoder_input, decoder_input):#, intensities, decoder_input):
-        #print("Enc", list(encoder_input))
-        #print("Dec", len(decoder_input))
-        encoder_input = self.encoder_positional_encoding(encoder_input)# intensities, decoder_input)#, decoder_input)
-        enc_output = self.encoder(encoder_input)
+    def forward(self, spectrum_embedding, decoder_input):#, intensities, decoder_input):
+        # spectrum_embedding embedding of the spectrum, and input to the transformer encoder. shape: [peak_num, model dim]
+        # decoder_input proteome ( string of amino acid symbols)
+        enc_output = self.encoder(spectrum_embedding)
+        # print("enc_output:", enc_output.shape)
 
         decoder_input_embedded = self.decoder_embedding(decoder_input)
         # print(f"decoder input (embedded) shape: {decoder_input_embedded.shape}")
@@ -670,18 +736,6 @@ class Transformer(nn.Module):
 
         return final_output
     
-
-class MultiTargetLoss(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, prediction, targets):
-        
-        target_lse = torch.mean(prediction[targets], dim=0)
-        # coeff = torch.tensor(len(targets), device=target_lse.device)
-        lse = torch.logsumexp(prediction, dim=0)
-
-        return lse - target_lse
         
 def get_logger(exp_id, log_path):
     logger = logging.getLogger('main')
