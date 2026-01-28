@@ -46,7 +46,7 @@ writer = SummaryWriter(log_dir=exp_dir)
 
 num_heads = 8
 num_layers = 4
-model_dim = 40
+model_dim = 512
 proteome_kernel_stride = 1 # Used in proteome embedding to reduce the proteom length.
 
 model = Transformer(device=device,
@@ -125,10 +125,10 @@ while step < MAX_STEPS:
             logits = model(spect_embed, full_seq)
             logits = logits.view(1, -1)
             center = (pos['start'] + pos['end'])//2
-            # print(center)
+            print(center)
 
-            # print(logits)
-            # exit()
+            print(logits)
+            exit()
 
             # center = (pos['start'] + pos['end'])//2
             # center_index = int(center //proteome_kernel_stride)
