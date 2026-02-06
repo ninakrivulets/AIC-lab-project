@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from torch.utils.tensorboard import SummaryWriter
 
-from model_with_pos_encoding import (
+from model_spectrum_enc import (
     Transformer,
     generate_uuid,
     get_logger,
@@ -101,6 +101,7 @@ while step < MAX_STEPS:
         df = df.sample(frac=1).reset_index(drop=True)
         file_loss = 0.0
         logger.info(f"Reading training data file: {fn}, Data read: {len(df)}")
+        accuracy_all = []
         for _, row in df.iterrows():
             peptide = row.sequence
             # print(peptide)
@@ -127,8 +128,8 @@ while step < MAX_STEPS:
             center = (pos['start'] + pos['end'])//2
             print(center)
 
-            print(logits)
-            exit()
+            #print(logits)
+            #exit()
 
             # center = (pos['start'] + pos['end'])//2
             # center_index = int(center //proteome_kernel_stride)
@@ -143,7 +144,11 @@ while step < MAX_STEPS:
             for pos in peptide_positions:
                 loss += loss_fn(logits, torch.tensor([pos], device=device))
             loss = loss/torch.tensor([len(peptide_positions)*1.0], device=device)
+            accuracy = (torch.argmax(logits) - center).abs().float()
+            accuracy_all.append(accuracy)
 
+            #accuracy = abs(torch.argmax(logits) - center)
+            writer.add_scalar("Accuracy/train", accuracy, step)
             # print(loss.item())
             # loss = loss_fn(logits.unsqueeze(0), target)
 
@@ -165,6 +170,7 @@ while step < MAX_STEPS:
         if step >= MAX_STEPS:
             break
         logger.info(f"{os.path.basename(fn)}: mean loss = {file_loss/len(df):.4f}")
+        logger.info(f"{os.path.basename(fn)}: mean accuracy = {torch.mean(torch.stack(accuracy_all)).item():.4f}")
         torch.save({
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict()
